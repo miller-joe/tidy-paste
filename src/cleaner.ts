@@ -42,7 +42,16 @@ const SENTENCE_TERMINATORS = new Set<string>([
   '"',
   "'",
   "`",
+  "|", // markdown table rows
+  ">", // closing tags / blockquote terminators
 ]);
+
+/**
+ * Minimum line length for the width-independent wrap detection.
+ * Lines shorter than this are never considered wrap candidates based on
+ * length alone — a natural short bullet point stays a bullet point.
+ */
+const MIN_ADAPTIVE_WRAP_LEN = 50;
 
 export function cleanCopiedText(input: string, opts: CleanOptions = {}): CleanResult {
   const notes: string[] = [];
@@ -151,6 +160,12 @@ function isWrapCandidate(line: string, terminalColumns: number, appWrapColumn: n
   if (appWrapColumn > 0 && Math.abs(line.length - appWrapColumn) <= 1) {
     return !/\s$/.test(line);
   }
+
+  // Width-independent fallback: long line that doesn't end with a
+  // terminator. This is the catch-all when the terminal's reported
+  // dimensions don't match the actual wrap column, which happens more
+  // often than it should (late rendering, custom terminal profiles).
+  if (line.length >= MIN_ADAPTIVE_WRAP_LEN) return true;
 
   return false;
 }

@@ -115,6 +115,34 @@ describe("preserve code fences", () => {
   });
 });
 
+describe("width-independent detection", () => {
+  it("rejoins a long line + short tail even when terminal width unknown", () => {
+    const input =
+      "  - Did you fully reload VS Code after install? (Command Palette -> \"Developer: Reload\n" +
+      "   Window.\")";
+    const r = cleanCopiedText(input, { terminalColumns: 0, appWrapColumn: 0 });
+    expect(r.changed).toBe(true);
+    expect(r.text.includes("\n")).toBe(false);
+  });
+
+  it("does not rejoin short bullets in a list", () => {
+    const input =
+      "- Ctrl+Shift+X (Extensions panel).\n" +
+      "- Search \"Tidy Paste.\" Confirm it shows.\n" +
+      "- Reload the window.";
+    const r = cleanCopiedText(input, { terminalColumns: 0, appWrapColumn: 0 });
+    expect(r.changed).toBe(false);
+  });
+
+  it("does not rejoin markdown table rows (pipe is a terminator)", () => {
+    const input =
+      "| A very long description column with lots of content | Data |\n" +
+      "| Another very long description column with content | More |";
+    const r = cleanCopiedText(input, { terminalColumns: 0, appWrapColumn: 0 });
+    expect(r.changed).toBe(false);
+  });
+});
+
 describe("edge cases", () => {
   it("empty input", () => {
     const r = cleanCopiedText("", { terminalColumns: 80 });

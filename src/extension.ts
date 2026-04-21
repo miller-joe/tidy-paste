@@ -2,10 +2,22 @@ import * as vscode from "vscode";
 import { cleanCopiedText } from "./cleaner.js";
 
 let output: vscode.OutputChannel | undefined;
+let statusBar: vscode.StatusBarItem | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Tidy Paste");
   context.subscriptions.push(output);
+
+  statusBar = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    100,
+  );
+  statusBar.text = "$(clippy) Tidy Paste: idle";
+  statusBar.tooltip =
+    "Tidy Paste status. Updates on each terminal copy. Click to open the Output panel.";
+  statusBar.command = "tidy-paste.showOutput";
+  statusBar.show();
+  context.subscriptions.push(statusBar);
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
@@ -20,28 +32,45 @@ export function activate(context: vscode.ExtensionContext): void {
       () => cleanEditorSelection(),
     ),
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("tidy-paste.showOutput", () => {
+      output?.show(true);
+    }),
+  );
 }
 
 export function deactivate(): void {
+  statusBar?.dispose();
   output?.dispose();
+}
+
+function setStatus(text: string): void {
+  if (statusBar) {
+    statusBar.text = `$(clippy) Tidy Paste: ${text}`;
+  }
 }
 
 async function terminalCopyClean(): Promise<void> {
   const config = vscode.workspace.getConfiguration("tidyPaste");
   if (config.get<boolean>("enabled") === false) {
-    // Kill switch: just run native copy and stop.
     await vscode.commands.executeCommand("workbench.action.terminal.copySelection");
+    setStatus("disabled");
     return;
   }
 
-  // Step 1: run native copy so the selection lands on the clipboard.
   await vscode.commands.executeCommand("workbench.action.terminal.copySelection");
 
-  // Step 2: read what landed.
   const raw = await vscode.env.clipboard.readText();
-  if (!raw || !raw.includes("\n")) return; // single-line copies need no cleanup
+  if (!raw) {
+    setStatus("empty clipboard");
+    return;
+  }
+  if (!raw.includes("\n")) {
+    setStatus("single line, no change");
+    return;
+  }
 
-  // Step 3: figure out the active terminal's column width.
   const terminalColumns = getActiveTerminalColumns();
 
   const result = cleanCopiedText(raw, {
@@ -53,14 +82,30 @@ async function terminalCopyClean(): Promise<void> {
   });
 
   if (config.get<boolean>("debug")) {
+    output?.appendLine("------");
     output?.appendLine(
-      `[copy] terminalColumns=${terminalColumns} changed=${result.changed} notes=${result.notes.length}`,
+      `[copy] terminalColumns=${terminalColumns} appWrap=${config.get<number>("appWrapColumn") ?? 80} changed=${result.changed} rawLines=${raw.split("\n").length}`,
     );
     for (const n of result.notes) output?.appendLine(`  ${n}`);
+    if (!result.changed && raw.split("\n").length > 1) {
+      // Show the first few lines with their lengths so the user can see why the
+      // heuristic didn't fire.
+      const sample = raw.split("\n").slice(0, 6);
+      output?.appendLine("  [nothing matched] first lines:");
+      for (let i = 0; i < sample.length; i++) {
+        const line = sample[i]!;
+        const end = line.length > 0 ? JSON.stringify(line[line.length - 1]!) : "(empty)";
+        output?.appendLine(`    ${i}: len=${line.length} lastChar=${end}`);
+      }
+    }
   }
 
   if (result.changed) {
     await vscode.env.clipboard.writeText(result.text);
+    const joined = result.notes.length;
+    setStatus(joined > 0 ? `joined ${joined} cluster(s)` : "cleaned whitespace");
+  } else {
+    setStatus("no change");
   }
 }
 
@@ -79,7 +124,7 @@ async function cleanEditorSelection(): Promise<void> {
     for (const sel of ranges) {
       const raw = editor.document.getText(sel);
       const result = cleanCopiedText(raw, {
-        terminalColumns: 0, // unknown for editor selection
+        terminalColumns: 0,
         appWrapColumn: config.get<number>("appWrapColumn") ?? 80,
         minWrapLines: config.get<number>("minWrapLines") ?? 2,
         stripTrailingWhitespace: config.get<boolean>("stripTrailingWhitespace") ?? true,
@@ -90,13 +135,12 @@ async function cleanEditorSelection(): Promise<void> {
       }
     }
   });
+  setStatus("editor selection cleaned");
 }
 
 function getActiveTerminalColumns(): number {
   const term = vscode.window.activeTerminal;
   if (!term) return 0;
-  // VS Code added Terminal.dimensions in 1.80+. It may be undefined until
-  // the terminal has rendered at least once.
   const dims = (term as unknown as { dimensions?: { columns: number; rows: number } }).dimensions;
   return dims?.columns ?? 0;
 }
