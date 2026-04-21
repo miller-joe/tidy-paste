@@ -2,7 +2,7 @@
   "name": "tidy-paste",
   "displayName": "Tidy Paste",
   "description": "Cleans terminal-wrapped text on copy from VS Code's integrated terminal so pasted content arrives without stray line breaks or trailing whitespace.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "miller-joe",
   "license": "MIT",
   "repository": {
@@ -61,6 +61,16 @@
           "type": "boolean",
           "default": true,
           "description": "Master switch. When off, terminal copy behaves as default."
+        },
+        "tidyPaste.watchClipboard": {
+          "type": "boolean",
+          "default": true,
+          "description": "Watch the clipboard for changes and clean wrapped content automatically. Works regardless of how you copied (Ctrl+C, right-click, mouse-select). Turn off if you only want the manual command."
+        },
+        "tidyPaste.watchIntervalMs": {
+          "type": "number",
+          "default": 300,
+          "description": "How often to check the clipboard for changes, in milliseconds. Lower = more responsive but uses slightly more CPU."
         },
         "tidyPaste.appWrapColumn": {
           "type": "number",

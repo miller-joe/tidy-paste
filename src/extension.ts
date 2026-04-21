@@ -3,6 +3,9 @@ import { cleanCopiedText } from "./cleaner.js";
 
 let output: vscode.OutputChannel | undefined;
 let statusBar: vscode.StatusBarItem | undefined;
+let watcherInterval: NodeJS.Timeout | undefined;
+let lastProcessed = "";
+let windowFocused = true;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Tidy Paste");
@@ -14,7 +17,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   statusBar.text = "$(clippy) Tidy Paste: idle";
   statusBar.tooltip =
-    "Tidy Paste status. Updates on each terminal copy. Click to open the Output panel.";
+    "Tidy Paste status. Updates on each clipboard change. Click to open the Output panel.";
   statusBar.command = "tidy-paste.showOutput";
   statusBar.show();
   context.subscriptions.push(statusBar);
@@ -38,9 +41,28 @@ export function activate(context: vscode.ExtensionContext): void {
       output?.show(true);
     }),
   );
+
+  context.subscriptions.push(
+    vscode.window.onDidChangeWindowState((state) => {
+      windowFocused = state.focused;
+    }),
+  );
+
+  startClipboardWatcher(context);
+
+  // Re-read settings on change to pick up watcher toggling without reload.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration("tidyPaste")) {
+        stopClipboardWatcher();
+        startClipboardWatcher(context);
+      }
+    }),
+  );
 }
 
 export function deactivate(): void {
+  stopClipboardWatcher();
   statusBar?.dispose();
   output?.dispose();
 }
@@ -48,6 +70,88 @@ export function deactivate(): void {
 function setStatus(text: string): void {
   if (statusBar) {
     statusBar.text = `$(clippy) Tidy Paste: ${text}`;
+  }
+}
+
+function startClipboardWatcher(context: vscode.ExtensionContext): void {
+  const config = vscode.workspace.getConfiguration("tidyPaste");
+  if (!config.get<boolean>("watchClipboard", true)) {
+    setStatus("watcher off");
+    return;
+  }
+  if (!config.get<boolean>("enabled", true)) {
+    setStatus("disabled");
+    return;
+  }
+  const intervalMs = Math.max(100, config.get<number>("watchIntervalMs") ?? 300);
+
+  watcherInterval = setInterval(() => {
+    if (!windowFocused) return; // cheap bail-out when VS Code is backgrounded
+    void tickClipboardWatcher();
+  }, intervalMs);
+
+  context.subscriptions.push({ dispose: stopClipboardWatcher });
+  setStatus("watching");
+}
+
+function stopClipboardWatcher(): void {
+  if (watcherInterval) {
+    clearInterval(watcherInterval);
+    watcherInterval = undefined;
+  }
+}
+
+async function tickClipboardWatcher(): Promise<void> {
+  try {
+    const current = await vscode.env.clipboard.readText();
+    if (!current || current === lastProcessed) return;
+
+    // Quick bail-outs before the heavier cleanup.
+    if (!current.includes("\n")) {
+      lastProcessed = current;
+      return;
+    }
+
+    const config = vscode.workspace.getConfiguration("tidyPaste");
+    if (!config.get<boolean>("enabled", true)) return;
+
+    const terminalColumns = getActiveTerminalColumns();
+    const result = cleanCopiedText(current, {
+      terminalColumns,
+      appWrapColumn: config.get<number>("appWrapColumn") ?? 80,
+      minWrapLines: config.get<number>("minWrapLines") ?? 2,
+      stripTrailingWhitespace: config.get<boolean>("stripTrailingWhitespace") ?? true,
+      preserveCodeFences: config.get<boolean>("preserveCodeFences") ?? true,
+    });
+
+    if (config.get<boolean>("debug", false)) {
+      output?.appendLine("------");
+      output?.appendLine(
+        `[watch] terminalColumns=${terminalColumns} changed=${result.changed} rawLines=${current.split("\n").length}`,
+      );
+      for (const n of result.notes) output?.appendLine(`  ${n}`);
+      if (!result.changed && current.split("\n").length > 1) {
+        const sample = current.split("\n").slice(0, 6);
+        output?.appendLine("  [nothing matched] first lines:");
+        for (let i = 0; i < sample.length; i++) {
+          const line = sample[i]!;
+          const end =
+            line.length > 0 ? JSON.stringify(line[line.length - 1]!) : "(empty)";
+          output?.appendLine(`    ${i}: len=${line.length} lastChar=${end}`);
+        }
+      }
+    }
+
+    if (result.changed) {
+      await vscode.env.clipboard.writeText(result.text);
+      lastProcessed = result.text; // don't re-process our own write
+      setStatus(`cleaned ${result.notes.length} cluster(s)`);
+    } else {
+      lastProcessed = current;
+      setStatus(`no change (${current.split("\n").length} lines)`);
+    }
+  } catch {
+    // Silent; clipboard access can fail mid-transition.
   }
 }
 
@@ -60,53 +164,9 @@ async function terminalCopyClean(): Promise<void> {
   }
 
   await vscode.commands.executeCommand("workbench.action.terminal.copySelection");
-
-  const raw = await vscode.env.clipboard.readText();
-  if (!raw) {
-    setStatus("empty clipboard");
-    return;
-  }
-  if (!raw.includes("\n")) {
-    setStatus("single line, no change");
-    return;
-  }
-
-  const terminalColumns = getActiveTerminalColumns();
-
-  const result = cleanCopiedText(raw, {
-    terminalColumns,
-    appWrapColumn: config.get<number>("appWrapColumn") ?? 80,
-    minWrapLines: config.get<number>("minWrapLines") ?? 2,
-    stripTrailingWhitespace: config.get<boolean>("stripTrailingWhitespace") ?? true,
-    preserveCodeFences: config.get<boolean>("preserveCodeFences") ?? true,
-  });
-
-  if (config.get<boolean>("debug")) {
-    output?.appendLine("------");
-    output?.appendLine(
-      `[copy] terminalColumns=${terminalColumns} appWrap=${config.get<number>("appWrapColumn") ?? 80} changed=${result.changed} rawLines=${raw.split("\n").length}`,
-    );
-    for (const n of result.notes) output?.appendLine(`  ${n}`);
-    if (!result.changed && raw.split("\n").length > 1) {
-      // Show the first few lines with their lengths so the user can see why the
-      // heuristic didn't fire.
-      const sample = raw.split("\n").slice(0, 6);
-      output?.appendLine("  [nothing matched] first lines:");
-      for (let i = 0; i < sample.length; i++) {
-        const line = sample[i]!;
-        const end = line.length > 0 ? JSON.stringify(line[line.length - 1]!) : "(empty)";
-        output?.appendLine(`    ${i}: len=${line.length} lastChar=${end}`);
-      }
-    }
-  }
-
-  if (result.changed) {
-    await vscode.env.clipboard.writeText(result.text);
-    const joined = result.notes.length;
-    setStatus(joined > 0 ? `joined ${joined} cluster(s)` : "cleaned whitespace");
-  } else {
-    setStatus("no change");
-  }
+  // The watcher will pick it up on its next tick. Kick a manual tick now
+  // so the user sees instant feedback if invoked from a keybinding.
+  await tickClipboardWatcher();
 }
 
 async function cleanEditorSelection(): Promise<void> {
