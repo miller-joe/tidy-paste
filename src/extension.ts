@@ -48,7 +48,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  startClipboardWatcher(context);
+  // Seed lastProcessed with whatever's in the clipboard right now so the
+  // watcher doesn't immediately clean pre-existing content on startup.
+  void vscode.env.clipboard.readText().then((seed) => {
+    lastProcessed = seed ?? "";
+    startClipboardWatcher(context);
+  });
 
   // Re-read settings on change to pick up watcher toggling without reload.
   context.subscriptions.push(
