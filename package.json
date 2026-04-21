@@ -1,0 +1,106 @@
+{
+  "name": "tidy-paste",
+  "displayName": "Tidy Paste",
+  "description": "Cleans terminal-wrapped text on copy from VS Code's integrated terminal so pasted content arrives without stray line breaks or trailing whitespace.",
+  "version": "0.0.1",
+  "publisher": "miller-joe",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/miller-joe/tidy-paste.git"
+  },
+  "bugs": {
+    "url": "https://github.com/miller-joe/tidy-paste/issues"
+  },
+  "homepage": "https://github.com/miller-joe/tidy-paste#readme",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": ["Other"],
+  "keywords": [
+    "terminal",
+    "clipboard",
+    "copy",
+    "paste",
+    "wrap",
+    "whitespace",
+    "llm",
+    "claude code"
+  ],
+  "activationEvents": [
+    "onCommand:tidy-paste.terminalCopyClean",
+    "onCommand:tidy-paste.cleanSelection"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "tidy-paste.terminalCopyClean",
+        "title": "Tidy Paste: Copy Cleaned (terminal)"
+      },
+      {
+        "command": "tidy-paste.cleanSelection",
+        "title": "Tidy Paste: Clean Selection (editor)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "tidy-paste.terminalCopyClean",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "terminalFocus && terminalTextSelected"
+      }
+    ],
+    "configuration": {
+      "title": "Tidy Paste",
+      "properties": {
+        "tidyPaste.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch. When off, terminal copy behaves as default."
+        },
+        "tidyPaste.appWrapColumn": {
+          "type": "number",
+          "default": 80,
+          "description": "Extra fixed column width to detect as an application-side hard wrap (e.g. 80 for many CLIs). Set to 0 to disable app-wrap detection and only use the current terminal width."
+        },
+        "tidyPaste.minWrapLines": {
+          "type": "number",
+          "default": 2,
+          "description": "Minimum consecutive candidate lines required to treat a block as wrapped. Raises the bar to avoid false positives on lists or short prose."
+        },
+        "tidyPaste.stripTrailingWhitespace": {
+          "type": "boolean",
+          "default": true,
+          "description": "Strip trailing whitespace from every line in the copied selection."
+        },
+        "tidyPaste.preserveCodeFences": {
+          "type": "boolean",
+          "default": true,
+          "description": "Never rewrap text inside a ``` fenced code block."
+        },
+        "tidyPaste.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log rewrite decisions to the Output panel (Tidy Paste channel)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^2.24.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}
