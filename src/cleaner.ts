@@ -97,11 +97,10 @@ export function cleanCopiedText(input: string, opts: CleanOptions = {}): CleanRe
     while (j < lines.length && !inFence.has(j)) {
       const next = lines[j]!;
       if (!next.trim()) break; // blank line = paragraph break
+      // If the next line looks like a new statement (shell command,
+      // cmdlet, etc.), don't pull it into the cluster.
+      if (looksLikeNewStatement(next)) break;
       const prev = cluster[cluster.length - 1]!;
-      // If the previous line in the cluster is a wrap candidate, the NEXT
-      // line continues the logical line. We also include that next line
-      // in the cluster even if it's short, because it's the terminating
-      // (un-wrapped) tail of the paragraph.
       if (isWrapCandidate(prev, terminalColumns, appWrapColumn)) {
         cluster.push(next);
         j++;
@@ -171,18 +170,73 @@ function isWrapCandidate(line: string, terminalColumns: number, appWrapColumn: n
 }
 
 function joinCluster(cluster: string[]): string {
-  // Join wrapped lines with a single space. If a wrapped line broke
-  // mid-word (no trailing space before the break) and the next line starts
-  // without a leading space, we still insert a space — it's almost never
-  // wrong, and detecting true mid-word breaks vs a word-boundary wrap
-  // from the copied buffer is unreliable.
+  // Strip trailing whitespace from every segment. Strip leading whitespace
+  // from continuation lines only (index > 0).
   const cleaned = cluster.map((line, idx) => {
-    // Strip trailing whitespace we may have re-introduced accidentally.
     const t = line.replace(/[ \t]+$/, "");
-    // Strip a single leading space from continuation lines only.
     return idx === 0 ? t : t.replace(/^[ \t]+/, "");
   });
-  return cleaned.join(" ").replace(/ +/g, " ").replace(/[ \t]+$/, "");
+  // Join each boundary with either "" or " " depending on whether the
+  // break looks mid-token (URL, decimal, contraction) or word-boundary.
+  let out = cleaned[0] ?? "";
+  for (let i = 1; i < cleaned.length; i++) {
+    const prev = cleaned[i - 1] ?? "";
+    const next = cleaned[i] ?? "";
+    const sep = joinSeparator(prev, next);
+    out += sep + next;
+  }
+  return out.replace(/[ \t]+$/, "");
+}
+
+const CONTINUATION_STARTERS = new Set<string>([
+  ".",
+  "/",
+  ")",
+  "]",
+  "}",
+  "'",
+  '"',
+  "`",
+  ",",
+  ";",
+  ":",
+  "?",
+  "!",
+  "-",
+]);
+
+/**
+ * Pick the separator to use when joining a wrapped line to its follow-on.
+ * Returns `""` for mid-token continuations (URLs, decimals, contractions)
+ * and `" "` for natural word-boundary joins.
+ */
+function joinSeparator(prev: string, next: string): string {
+  if (prev.length === 0 || next.length === 0) return "";
+  const lastChar = prev[prev.length - 1]!;
+  const firstChar = next[0]!;
+  // If either side is already whitespace-adjacent, a space is implicit.
+  if (/\s/.test(lastChar) || /\s/.test(firstChar)) return "";
+  // If the next line starts with continuation-style punctuation, the
+  // break was almost certainly mid-token.
+  if (CONTINUATION_STARTERS.has(firstChar)) return "";
+  return " ";
+}
+
+/**
+ * Detect that `line` starts a new logical statement (a new sentence,
+ * command, list item, etc.) and therefore should NOT be merged into the
+ * preceding cluster.
+ */
+export function looksLikeNewStatement(line: string): boolean {
+  const trimmed = line.replace(/^\s+/, "");
+  if (!trimmed) return false;
+  // PowerShell-style Verb-Noun cmdlet: "Invoke-WebRequest", "Get-ChildItem"
+  if (/^[A-Z][a-z]+-[A-Z]/.test(trimmed)) return true;
+  // Common shell commands at the start of a line.
+  if (/^(sudo|npm|yarn|pnpm|node|deno|bun|python|pip|cargo|go|rustc|make|cmake|code|git|docker|podman|kubectl|helm|ssh|scp|rsync|curl|wget|http|cd|ls|rm|cp|mv|mkdir|touch|cat|tail|head|grep|awk|sed|find|xargs|brew|apt|dnf|yum|zypper|pacman|systemctl|journalctl|ps|kill|top|htop|tmux|screen|vim|nvim|emacs|nano|less|more|tar|unzip|zip|chmod|chown|export|source|echo|printf|ollama|claude|pytest|vitest|jest)\s/.test(trimmed)) return true;
+  // REPL or prompt continuation markers.
+  if (/^(\$|PS |> )/.test(trimmed) && trimmed !== ">") return true;
+  return false;
 }
 
 /** Return the set of line indices that sit inside ``` fenced blocks. */

@@ -143,6 +143,47 @@ describe("width-independent detection", () => {
   });
 });
 
+describe("smart space on join", () => {
+  it("does not insert a space when the next line starts with a period (URL continuation)", () => {
+    const input =
+      "  Download: https://github.com/miller-joe/tidy-paste/releases/download/v0\n" +
+      "  .0.4/tidy-paste-0.0.4.vsix";
+    const r = cleanCopiedText(input, { terminalColumns: 0, appWrapColumn: 0 });
+    expect(r.changed).toBe(true);
+    expect(r.text).toContain("/v0.0.4/tidy-paste-0.0.4.vsix");
+    expect(r.text).not.toContain("v0 .0.4");
+  });
+
+  it("uses a single space when joining word-boundary wraps", () => {
+    const line1 = "The quick brown fox jumped over the lazy dog and then did some other things";
+    const line2 = "and kept going";
+    const r = cleanCopiedText(`${line1}\n${line2}`, {
+      terminalColumns: 0,
+      appWrapColumn: 0,
+    });
+    expect(r.text).toBe(`${line1} ${line2}`);
+  });
+});
+
+describe("new-statement cluster breaks", () => {
+  it("does not merge a PowerShell cmdlet with the previous line", () => {
+    const input =
+      "  code --uninstall-extension miller-joe.tidy-paste\n" +
+      '  Invoke-WebRequest -Uri "https://example.com/file.vsix"';
+    const r = cleanCopiedText(input, { terminalColumns: 0, appWrapColumn: 0 });
+    expect(r.text.split("\n").length).toBe(2);
+  });
+
+  it("does not merge a line that starts with a known shell command", () => {
+    const input =
+      "  some long description line that triggers the wrap heuristic by being very long indeed\n" +
+      "  npm install tidy-paste-but-as-a-command";
+    const r = cleanCopiedText(input, { terminalColumns: 0, appWrapColumn: 0 });
+    // npm-prefixed next line breaks the cluster.
+    expect(r.text.split("\n").length).toBe(2);
+  });
+});
+
 describe("edge cases", () => {
   it("empty input", () => {
     const r = cleanCopiedText("", { terminalColumns: 80 });
