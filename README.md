@@ -1,5 +1,10 @@
 # tidy-paste
 
+[![CI](https://github.com/miller-joe/tidy-paste/actions/workflows/ci.yml/badge.svg)](https://github.com/miller-joe/tidy-paste/actions/workflows/ci.yml)
+[![MIT license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/miller-joe?style=social&logo=github)](https://github.com/sponsors/miller-joe)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/indivisionjoe)
+
 VS Code extension that cleans copied text from the integrated terminal before it hits your clipboard. Wrapped lines join back into one, trailing whitespace is stripped, code blocks are left alone. Pasting into anything — editor, chat, browser, Slack — comes out clean.
 
 ## Why
@@ -91,3 +96,10 @@ Requires Node 20+.
 ## License
 
 MIT
+
+## Support
+
+If this saves your clipboard from garbage daily:
+
+[![GitHub Sponsors](https://img.shields.io/github/sponsors/miller-joe?style=social&logo=github)](https://github.com/sponsors/miller-joe)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/indivisionjoe)
