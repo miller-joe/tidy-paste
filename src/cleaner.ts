@@ -51,7 +51,7 @@ const SENTENCE_TERMINATORS = new Set<string>([
  * Lines shorter than this are never considered wrap candidates based on
  * length alone — a natural short bullet point stays a bullet point.
  */
-const MIN_ADAPTIVE_WRAP_LEN = 50;
+const MIN_ADAPTIVE_WRAP_LEN = 40;
 
 export function cleanCopiedText(input: string, opts: CleanOptions = {}): CleanResult {
   const notes: string[] = [];
