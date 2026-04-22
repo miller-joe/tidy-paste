@@ -2,7 +2,7 @@
   "name": "tidy-paste",
   "displayName": "Tidy Paste",
   "description": "Cleans terminal-wrapped text on copy from VS Code's integrated terminal so pasted content arrives without stray line breaks or trailing whitespace.",
-  "version": "0.0.6",
+  "version": "0.1.0",
   "publisher": "miller-joe",
   "license": "MIT",
   "repository": {
@@ -44,6 +44,10 @@
       {
         "command": "tidy-paste.showOutput",
         "title": "Tidy Paste: Show Debug Output"
+      },
+      {
+        "command": "tidy-paste.restoreRaw",
+        "title": "Tidy Paste: Restore Raw Clipboard (undo last clean)"
       }
     ],
     "keybindings": [
@@ -52,6 +56,11 @@
         "key": "ctrl+c",
         "mac": "cmd+c",
         "when": "terminalFocus && terminalTextSelected"
+      },
+      {
+        "command": "tidy-paste.restoreRaw",
+        "key": "ctrl+alt+z",
+        "mac": "cmd+alt+z"
       }
     ],
     "configuration": {
@@ -91,6 +100,11 @@
           "type": "boolean",
           "default": true,
           "description": "Never rewrap text inside a ``` fenced code block."
+        },
+        "tidyPaste.dedent": {
+          "type": "boolean",
+          "default": true,
+          "description": "Strip the common leading indent shared by all non-blank lines. Removes terminal-renderer indentation artifacts (Claude Code indents markdown) while preserving relative indentation for nested lists and code."
         },
         "tidyPaste.debug": {
           "type": "boolean",

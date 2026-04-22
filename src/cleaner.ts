@@ -1,201 +1,71 @@
 /**
- * Core cleanup logic. Given a chunk of text copied from a terminal plus
- * the terminal's current column width, decide which `\n` characters were
- * inserted by visual wrapping (either by the terminal at its own width
- * or by the application at a fixed column like 80) and rejoin them.
+ * Core cleanup logic. Given text copied from a terminal, decide which of
+ * the `\n` characters were inserted by visual wrapping and rejoin those,
+ * while leaving intentional line breaks alone.
  *
- * Designed to be conservative: when in doubt, leave the line alone. The
- * user should never be surprised by a rewrite in the middle of actual
- * code or a list.
+ * Model: we don't classify LINES as wrap-candidates. We classify each
+ * NEWLINE BOUNDARY between consecutive lines as join-or-break, using a
+ * score that weighs multiple structural signals. Boundaries scoring at
+ * or above the threshold get joined.
+ *
+ * This file is intentionally dependency-free and synchronous so it can
+ * be called from both the extension and any future CLI wrapper.
  */
 
 export interface CleanOptions {
-  /** The terminal's current column width. Lines that are exactly this long are prime suspects for a soft wrap. */
+  /** The terminal's current column width. Used as one of the wrap-mode candidates. */
   terminalColumns?: number;
-  /** Extra fixed column width to treat as an application-side hard wrap. Many CLIs emit 80-col output regardless of terminal size. Set to 0 to disable. */
+  /** A fixed app-side wrap column (many CLIs emit 80-col output). Used as another wrap-mode candidate. */
   appWrapColumn?: number;
-  /** Minimum consecutive candidate lines required to treat a block as wrapped. Avoids rewriting two-line lists or short dialogue. */
-  minWrapLines?: number;
   /** Strip trailing whitespace from every non-empty line. */
   stripTrailingWhitespace?: boolean;
-  /** Never rewrap inside ``` fenced blocks. */
-  preserveCodeFences?: boolean;
+  /** Never rewrap inside ``` fenced blocks or detected prompt/table blocks. */
+  preserveBlocks?: boolean;
+  /** Strip the common leading indent per block. */
+  dedent?: boolean;
+  /** Join-score threshold (default 3). Lower = more aggressive. */
+  threshold?: number;
 }
 
 export interface CleanResult {
   text: string;
   changed: boolean;
-  /** Per-decision log, primarily for debug output. */
   notes: string[];
 }
 
-const SENTENCE_TERMINATORS = new Set<string>([
+// Strong terminators: structural chars that usually end a logical unit.
+// '>' is excluded because '->' arrows are common in prose and code.
+const STRONG_TERMINATORS = new Set<string>([
+  "|",
+  "}",
+  "]",
+  ")",
+  "`",
+]);
+
+// Weak terminators: clause/sentence punctuation. Can be overridden when the line
+// ends at an inferred wrap mode.
+const WEAK_TERMINATORS = new Set<string>([
   ".",
   "!",
   "?",
   ":",
   ";",
   ",",
-  ")",
-  "]",
-  "}",
   '"',
   "'",
-  "`",
-  "|", // markdown table rows
-  ">", // closing tags / blockquote terminators
 ]);
 
-/**
- * Minimum line length for the width-independent wrap detection.
- * Lines shorter than this are never considered wrap candidates based on
- * length alone — a natural short bullet point stays a bullet point.
- */
-const MIN_ADAPTIVE_WRAP_LEN = 40;
-
-export function cleanCopiedText(input: string, opts: CleanOptions = {}): CleanResult {
-  const notes: string[] = [];
-  const terminalColumns = opts.terminalColumns ?? 0;
-  const appWrapColumn = opts.appWrapColumn ?? 80;
-  const minWrapLines = Math.max(1, opts.minWrapLines ?? 2);
-  const stripTrailing = opts.stripTrailingWhitespace ?? true;
-  const preserveFences = opts.preserveCodeFences ?? true;
-
-  // Preserve trailing newline exactly as received.
-  const endedWithNewline = input.endsWith("\n");
-  const body = endedWithNewline ? input.slice(0, -1) : input;
-
-  const rawLines = body.split(/\r?\n/);
-  const lines = stripTrailing ? rawLines.map((l) => l.replace(/[ \t]+$/, "")) : rawLines.slice();
-
-  const inFence = preserveFences ? detectFenceRanges(lines) : new Set<number>();
-
-  const out: string[] = [];
-  let i = 0;
-
-  // Walk lines, greedily merging wrap clusters.
-  while (i < lines.length) {
-    if (inFence.has(i)) {
-      out.push(lines[i]!);
-      i++;
-      continue;
-    }
-
-    const line = lines[i]!;
-    const isCandidate = isWrapCandidate(line, terminalColumns, appWrapColumn);
-
-    if (!isCandidate) {
-      out.push(line);
-      i++;
-      continue;
-    }
-
-    // Greedy lookahead: how many consecutive wrap candidates sit here?
-    const clusterStart = i;
-    const cluster: string[] = [line];
-    let j = i + 1;
-    while (j < lines.length && !inFence.has(j)) {
-      const next = lines[j]!;
-      if (!next.trim()) break; // blank line = paragraph break
-      // If the next line looks like a new statement (shell command,
-      // cmdlet, etc.), don't pull it into the cluster.
-      if (looksLikeNewStatement(next)) break;
-      const prev = cluster[cluster.length - 1]!;
-      if (isWrapCandidate(prev, terminalColumns, appWrapColumn)) {
-        cluster.push(next);
-        j++;
-        // If the line we just added is itself short, the wrap chain ends.
-        if (!isWrapCandidate(next, terminalColumns, appWrapColumn)) {
-          break;
-        }
-      } else {
-        break;
-      }
-    }
-
-    // Did we gather enough lines AND a meaningful tail? The tail line
-    // should not itself be a wrap candidate (else we may have run off the
-    // end of input mid-wrap, which is still joinable but less confident).
-    if (cluster.length >= minWrapLines) {
-      const joined = joinCluster(cluster);
-      out.push(joined);
-      notes.push(
-        `joined ${cluster.length} lines starting at line ${clusterStart + 1} (terminal=${terminalColumns}, appWrap=${appWrapColumn})`,
-      );
-      i = j;
-    } else {
-      // Not enough lines to be confident. Leave the cluster untouched.
-      out.push(...cluster);
-      i = j;
-    }
-  }
-
-  let text = out.join("\n");
-  if (endedWithNewline) text += "\n";
-
-  const changed = text !== input;
-  return { text, changed, notes };
-}
-
-function isWrapCandidate(line: string, terminalColumns: number, appWrapColumn: number): boolean {
-  if (line.length === 0) return false;
-  // If the line ends with a sentence terminator or closing punctuation, it
-  // almost certainly isn't a mid-word wrap. Leave alone.
-  const last = line[line.length - 1]!;
-  if (SENTENCE_TERMINATORS.has(last)) return false;
-
-  // Terminal soft-wrap: line length exactly matches the terminal width.
-  if (terminalColumns > 0 && line.length === terminalColumns) return true;
-
-  // App-side fixed-width wrap (e.g. 80-col CLIs).
-  if (appWrapColumn > 0 && line.length === appWrapColumn) return true;
-
-  // Near-boundary tolerance: many terminals trim or pad whitespace at the
-  // wrap edge. Allow a 1-character slack on BOTH known widths.
-  if (terminalColumns > 0 && Math.abs(line.length - terminalColumns) <= 1) {
-    // Require the line NOT to end with whitespace (trimmed soft wrap).
-    return !/\s$/.test(line);
-  }
-  if (appWrapColumn > 0 && Math.abs(line.length - appWrapColumn) <= 1) {
-    return !/\s$/.test(line);
-  }
-
-  // Width-independent fallback: long line that doesn't end with a
-  // terminator. This is the catch-all when the terminal's reported
-  // dimensions don't match the actual wrap column, which happens more
-  // often than it should (late rendering, custom terminal profiles).
-  if (line.length >= MIN_ADAPTIVE_WRAP_LEN) return true;
-
-  return false;
-}
-
-function joinCluster(cluster: string[]): string {
-  // Strip trailing whitespace from every segment. Strip leading whitespace
-  // from continuation lines only (index > 0).
-  const cleaned = cluster.map((line, idx) => {
-    const t = line.replace(/[ \t]+$/, "");
-    return idx === 0 ? t : t.replace(/^[ \t]+/, "");
-  });
-  // Join each boundary with either "" or " " depending on whether the
-  // break looks mid-token (URL, decimal, contraction) or word-boundary.
-  let out = cleaned[0] ?? "";
-  for (let i = 1; i < cleaned.length; i++) {
-    const prev = cleaned[i - 1] ?? "";
-    const next = cleaned[i] ?? "";
-    const sep = joinSeparator(prev, next);
-    out += sep + next;
-  }
-  return out.replace(/[ \t]+$/, "");
-}
-
+// Characters that, when they START the next line, imply the newline was
+// mid-token (URL slash, decimal point, closing paren, etc.). Quotes are
+// NOT included: a quote at the start of a line usually opens a new quoted
+// phrase that needs a space before it.
 const CONTINUATION_STARTERS = new Set<string>([
   ".",
   "/",
   ")",
   "]",
   "}",
-  "'",
-  '"',
   "`",
   ",",
   ";",
@@ -205,53 +75,371 @@ const CONTINUATION_STARTERS = new Set<string>([
   "-",
 ]);
 
+const MIN_ADAPTIVE_WRAP_LEN = 40;
+const WRAP_COLUMN_SLACK = 2;
+
+export function cleanCopiedText(input: string, opts: CleanOptions = {}): CleanResult {
+  const notes: string[] = [];
+  const terminalColumns = opts.terminalColumns ?? 0;
+  const appWrapColumn = opts.appWrapColumn ?? 80;
+  const stripTrailing = opts.stripTrailingWhitespace ?? true;
+  const preserveBlocks = opts.preserveBlocks ?? true;
+  const doDedent = opts.dedent ?? true;
+  const threshold = opts.threshold ?? 3;
+
+  const endedWithNewline = input.endsWith("\n");
+  const body = endedWithNewline ? input.slice(0, -1) : input;
+
+  let rawLines = body.split(/\r?\n/);
+  if (stripTrailing) rawLines = rawLines.map((l) => l.replace(/[ \t]+$/, ""));
+
+  // 1. Detect hard blocks. Lines inside these are preserved verbatim and
+  //    boundaries into/out of them are always breaks.
+  const hardLines = preserveBlocks
+    ? detectHardBlocks(rawLines)
+    : new Set<number>();
+
+  // 2. Dedent per block (prose regions share their own min indent; each
+  //    hard block keeps its own indentation).
+  const lines = doDedent ? dedentPerBlock(rawLines, hardLines) : rawLines.slice();
+
+  // 3. Compute wrap modes from the length distribution.
+  const wrapModes = computeWrapModes(lines, hardLines, terminalColumns, appWrapColumn);
+
+  // 4. Track the active list-item body column at each line.
+  const listBodyCols = computeListBodyColumns(lines);
+
+  // 5. Compute a join score for each boundary i→i+1, then merge runs.
+  const joinBoundary: boolean[] = new Array(Math.max(0, lines.length - 1)).fill(false);
+  for (let i = 0; i < lines.length - 1; i++) {
+    const score = scoreBoundary(
+      lines[i]!,
+      lines[i + 1]!,
+      i,
+      i + 1,
+      hardLines,
+      wrapModes,
+      listBodyCols,
+    );
+    joinBoundary[i] = score >= threshold;
+    if (joinBoundary[i] && notes.length < 20) {
+      notes.push(`join boundary ${i}→${i + 1} (score=${score})`);
+    }
+  }
+
+  // 6. Merge consecutive join-true runs.
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const cluster: string[] = [lines[i]!];
+    let j = i;
+    while (j < lines.length - 1 && joinBoundary[j]) {
+      cluster.push(lines[j + 1]!);
+      j++;
+    }
+    out.push(cluster.length > 1 ? mergeCluster(cluster) : cluster[0]!);
+    i = j + 1;
+  }
+
+  let text = out.join("\n");
+  if (endedWithNewline) text += "\n";
+  return { text, changed: text !== input, notes };
+}
+
+// ---- structural detection ----
+
 /**
- * Pick the separator to use when joining a wrapped line to its follow-on.
- * Returns `""` for mid-token continuations (URLs, decimals, contractions)
- * and `" "` for natural word-boundary joins.
+ * Detect all "hard" blocks: fenced code, markdown tables, prompt/command
+ * runs. Returns a set of line indices that are inside one of these blocks.
+ * Boundaries in or out of them will always break.
  */
+function detectHardBlocks(lines: string[]): Set<number> {
+  const inside = new Set<number>();
+  let openFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (/^\s*```/.test(line)) {
+      inside.add(i);
+      openFence = !openFence;
+      continue;
+    }
+    if (openFence) inside.add(i);
+  }
+
+  // Markdown table: 2+ consecutive lines where each has 2+ `|` separators.
+  for (let i = 0; i < lines.length; i++) {
+    if (inside.has(i)) continue;
+    if (countPipes(lines[i]!) < 2) continue;
+    let j = i;
+    while (j < lines.length && !inside.has(j) && countPipes(lines[j]!) >= 2) j++;
+    if (j - i >= 2) {
+      for (let k = i; k < j; k++) inside.add(k);
+    }
+    i = j - 1;
+  }
+
+  // Prompt/command runs: 2+ consecutive lines that look like shell commands.
+  for (let i = 0; i < lines.length; i++) {
+    if (inside.has(i)) continue;
+    if (!looksLikeCommandLine(lines[i]!)) continue;
+    let j = i;
+    while (j < lines.length && !inside.has(j) && looksLikeCommandLine(lines[j]!)) j++;
+    if (j - i >= 2) {
+      for (let k = i; k < j; k++) inside.add(k);
+    }
+    i = j - 1;
+  }
+
+  return inside;
+}
+
+function countPipes(line: string): number {
+  let n = 0;
+  for (const ch of line) if (ch === "|") n++;
+  return n;
+}
+
+const KNOWN_COMMAND_HEAD =
+  /^(sudo|npm|npx|yarn|pnpm|node|deno|bun|python|pip|cargo|go|rustc|make|cmake|code|git|docker|podman|kubectl|helm|ssh|scp|rsync|curl|wget|http|cd|ls|rm|cp|mv|mkdir|touch|cat|tail|head|grep|awk|sed|find|xargs|brew|apt|dnf|yum|zypper|pacman|systemctl|journalctl|ps|kill|top|htop|tmux|screen|vim|nvim|emacs|nano|less|more|tar|unzip|zip|chmod|chown|export|source|echo|printf|ollama|claude|pytest|vitest|jest|Invoke-[A-Z]|Get-[A-Z]|Set-[A-Z]|Remove-[A-Z]|Install-[A-Z]|Uninstall-[A-Z]|New-[A-Z]|Start-[A-Z]|Stop-[A-Z])(\s|$)/;
+
+function looksLikeCommandLine(line: string): boolean {
+  const trimmed = line.replace(/^\s+/, "");
+  if (!trimmed) return false;
+  if (/^(\$|PS\s|#\s|> )/.test(trimmed)) return true;
+  return KNOWN_COMMAND_HEAD.test(trimmed);
+}
+
+// ---- list-item body column tracking ----
+
+const LIST_MARKER_RE = /^([ \t]*)(?:([-*+•])|(\d+[.)])|([A-Za-z][.)]))(\s+)(.*)$/;
+
+function computeListBodyColumns(lines: string[]): (number | null)[] {
+  const out: (number | null)[] = new Array(lines.length).fill(null);
+  let activeBodyCol: number | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (!line.trim()) {
+      activeBodyCol = null;
+      continue;
+    }
+    const marker = LIST_MARKER_RE.exec(line);
+    if (marker) {
+      const indent = marker[1]!.length;
+      const markerTok = marker[2] ?? marker[3] ?? marker[4] ?? "";
+      const ws = marker[5] ?? "";
+      activeBodyCol = indent + markerTok.length + ws.length;
+      out[i] = activeBodyCol;
+    } else if (activeBodyCol !== null) {
+      const indent = (line.match(/^[ \t]*/)?.[0] ?? "").length;
+      if (indent >= activeBodyCol) {
+        out[i] = activeBodyCol;
+      } else {
+        activeBodyCol = null;
+        out[i] = null;
+      }
+    }
+  }
+  return out;
+}
+
+// ---- wrap-mode inference ----
+
+interface WrapModes {
+  modes: number[];
+}
+
+function computeWrapModes(
+  lines: string[],
+  hardLines: Set<number>,
+  terminalColumns: number,
+  appWrapColumn: number,
+): WrapModes {
+  const modes: number[] = [];
+  if (terminalColumns > 0) modes.push(terminalColumns);
+  if (appWrapColumn > 0 && !modes.includes(appWrapColumn)) modes.push(appWrapColumn);
+
+  // Statistical inference: find the longest non-hard-block line with
+  // 2+ peers within ±slack.
+  const lengths: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (hardLines.has(i)) continue;
+    const line = lines[i]!;
+    if (line.trim().length === 0) continue;
+    lengths.push(line.length);
+  }
+  if (lengths.length >= 2) {
+    const max = Math.max(...lengths);
+    if (max >= 30) {
+      const near = lengths.filter((l) => Math.abs(l - max) <= WRAP_COLUMN_SLACK).length;
+      if (near >= 2 && !modes.some((m) => Math.abs(m - max) <= WRAP_COLUMN_SLACK)) {
+        modes.push(max);
+      }
+    }
+  }
+  return { modes };
+}
+
+function lineEndsAtWrapMode(lineLength: number, modes: WrapModes): boolean {
+  for (const m of modes.modes) {
+    if (Math.abs(lineLength - m) <= WRAP_COLUMN_SLACK) return true;
+  }
+  return false;
+}
+
+// ---- boundary scoring ----
+
+function scoreBoundary(
+  prev: string,
+  next: string,
+  prevIdx: number,
+  nextIdx: number,
+  hardLines: Set<number>,
+  wrapModes: WrapModes,
+  listBodyCols: (number | null)[],
+): number {
+  // Hard never-join conditions.
+  if (prev.trim().length === 0 || next.trim().length === 0) return -Infinity;
+  if (hardLines.has(prevIdx) || hardLines.has(nextIdx)) return -Infinity;
+
+  let score = 0;
+
+  // +3: previous line length lands on a known wrap mode.
+  if (lineEndsAtWrapMode(prev.length, wrapModes)) score += 3;
+
+  // +2: next line is indented close to an active list body column
+  // (continuation). Allow ±2 slack because terminals don't always rewrap
+  // continuations to the exact body column.
+  const activeCol = listBodyCols[prevIdx];
+  if (activeCol !== null && activeCol !== undefined) {
+    const nextIndent = (next.match(/^[ \t]*/)?.[0] ?? "").length;
+    if (Math.abs(nextIndent - activeCol) <= 2) score += 2;
+  }
+
+  // +1: next line starts with a lowercase letter, digit, or opening punct.
+  const firstNon = next.replace(/^\s+/, "")[0];
+  if (firstNon && /[a-z0-9(["'“‘]/.test(firstNon)) score += 1;
+
+  // +2: boundary looks mid-token (next starts with continuation punctuation).
+  if (firstNon && CONTINUATION_STARTERS.has(firstNon)) score += 2;
+
+  // Strong terminator on prev: negative, but not absolute. A parenthetical
+  // ending at the wrap boundary with a lowercase continuation can still beat
+  // this penalty with enough positive signal.
+  const lastChar = prev[prev.length - 1]!;
+  if (STRONG_TERMINATORS.has(lastChar)) score -= 3;
+
+  // Weak terminator on prev, WITHOUT a wrap-mode match: negative.
+  if (WEAK_TERMINATORS.has(lastChar) && !lineEndsAtWrapMode(prev.length, wrapModes)) {
+    score -= 2;
+  }
+
+  // When the prev line ends with structural punctuation BUT the next line
+  // starts with a clear continuation (lowercase letter, conjunction-like
+  // word), the punctuation was almost certainly a parenthetical closing at
+  // the wrap column and the sentence continues. Boost so we actually join.
+  if (
+    STRONG_TERMINATORS.has(lastChar) &&
+    firstNon &&
+    /[a-z]/.test(firstNon) &&
+    !looksCodeDense(prev) &&
+    !looksCodeDense(next)
+  ) {
+    score += 3;
+  }
+
+  // -4: next line starts a new peer list item, command, or prompt.
+  if (looksLikeNewStatement(next)) score -= 4;
+
+  // -5: both sides look code/shell dense (heuristic: contains common code glyphs).
+  if (looksCodeDense(prev) && looksCodeDense(next)) score -= 5;
+
+  // Adaptive fallback: prev is long, no wrap-mode match, no terminator → slight +1.
+  if (
+    !lineEndsAtWrapMode(prev.length, wrapModes) &&
+    prev.length >= MIN_ADAPTIVE_WRAP_LEN &&
+    !STRONG_TERMINATORS.has(lastChar) &&
+    !WEAK_TERMINATORS.has(lastChar)
+  ) {
+    score += 2;
+  }
+
+  return score;
+}
+
+function looksCodeDense(line: string): boolean {
+  // Heuristic: contains multiple "code glyphs" per line.
+  let n = 0;
+  for (const ch of line) {
+    if (ch === "{" || ch === "}" || ch === "=" || ch === "(" || ch === ")" || ch === ";") n++;
+  }
+  return n >= 3;
+}
+
+export function looksLikeNewStatement(line: string): boolean {
+  const trimmed = line.replace(/^\s+/, "");
+  if (!trimmed) return false;
+  if (/^[-*+•]\s/.test(trimmed)) return true;
+  if (/^\d+[.)]\s/.test(trimmed)) return true;
+  if (/^[a-zA-Z][.)]\s/.test(trimmed)) return true;
+  if (/^[A-Z][a-z]+-[A-Z]/.test(trimmed)) return true;
+  if (KNOWN_COMMAND_HEAD.test(trimmed)) return true;
+  if (/^(\$|PS |> )/.test(trimmed) && trimmed !== ">") return true;
+  return false;
+}
+
+// ---- merge + dedent ----
+
+function mergeCluster(cluster: string[]): string {
+  const cleaned = cluster.map((line, idx) => {
+    const t = line.replace(/[ \t]+$/, "");
+    return idx === 0 ? t : t.replace(/^[ \t]+/, "");
+  });
+  let out = cleaned[0] ?? "";
+  for (let i = 1; i < cleaned.length; i++) {
+    const prev = cleaned[i - 1] ?? "";
+    const next = cleaned[i] ?? "";
+    out += joinSeparator(prev, next) + next;
+  }
+  return out.replace(/[ \t]+$/, "");
+}
+
 function joinSeparator(prev: string, next: string): string {
   if (prev.length === 0 || next.length === 0) return "";
   const lastChar = prev[prev.length - 1]!;
   const firstChar = next[0]!;
-  // If either side is already whitespace-adjacent, a space is implicit.
   if (/\s/.test(lastChar) || /\s/.test(firstChar)) return "";
-  // If the next line starts with continuation-style punctuation, the
-  // break was almost certainly mid-token.
   if (CONTINUATION_STARTERS.has(firstChar)) return "";
   return " ";
 }
 
 /**
- * Detect that `line` starts a new logical statement (a new sentence,
- * command, list item, etc.) and therefore should NOT be merged into the
- * preceding cluster.
+ * Dedent per block: each contiguous run of non-hard lines gets its own
+ * common-leading-whitespace strip. Hard-block lines are untouched.
  */
-export function looksLikeNewStatement(line: string): boolean {
-  const trimmed = line.replace(/^\s+/, "");
-  if (!trimmed) return false;
-  // PowerShell-style Verb-Noun cmdlet: "Invoke-WebRequest", "Get-ChildItem"
-  if (/^[A-Z][a-z]+-[A-Z]/.test(trimmed)) return true;
-  // Common shell commands at the start of a line.
-  if (/^(sudo|npm|yarn|pnpm|node|deno|bun|python|pip|cargo|go|rustc|make|cmake|code|git|docker|podman|kubectl|helm|ssh|scp|rsync|curl|wget|http|cd|ls|rm|cp|mv|mkdir|touch|cat|tail|head|grep|awk|sed|find|xargs|brew|apt|dnf|yum|zypper|pacman|systemctl|journalctl|ps|kill|top|htop|tmux|screen|vim|nvim|emacs|nano|less|more|tar|unzip|zip|chmod|chown|export|source|echo|printf|ollama|claude|pytest|vitest|jest)\s/.test(trimmed)) return true;
-  // REPL or prompt continuation markers.
-  if (/^(\$|PS |> )/.test(trimmed) && trimmed !== ">") return true;
-  return false;
-}
-
-/** Return the set of line indices that sit inside ``` fenced blocks. */
-function detectFenceRanges(lines: string[]): Set<number> {
-  const inside = new Set<number>();
-  let open = false;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (/^\s*```/.test(line)) {
-      // The fence lines themselves are counted as "inside" so we preserve them verbatim too.
-      inside.add(i);
-      open = !open;
+function dedentPerBlock(lines: string[], hardLines: Set<number>): string[] {
+  const out = lines.slice();
+  let i = 0;
+  while (i < out.length) {
+    if (hardLines.has(i)) {
+      i++;
       continue;
     }
-    if (open) inside.add(i);
+    let j = i;
+    while (j < out.length && !hardLines.has(j)) j++;
+    const block = out.slice(i, j);
+    const minIndent = block.reduce((min, l) => {
+      if (l.trim().length === 0) return min;
+      const indent = (l.match(/^[ \t]*/)?.[0] ?? "").length;
+      return Math.min(min, indent);
+    }, Infinity);
+    if (minIndent > 0 && minIndent !== Infinity) {
+      for (let k = i; k < j; k++) {
+        if (out[k]!.trim().length === 0) continue;
+        const indent = (out[k]!.match(/^[ \t]*/)?.[0] ?? "").length;
+        out[k] = out[k]!.slice(Math.min(minIndent, indent));
+      }
+    }
+    i = j;
   }
-  return inside;
+  return out;
 }

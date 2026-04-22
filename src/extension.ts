@@ -6,6 +6,8 @@ let statusBar: vscode.StatusBarItem | undefined;
 let watcherInterval: NodeJS.Timeout | undefined;
 let lastProcessed = "";
 let windowFocused = true;
+/** Last raw clipboard content we cleaned, kept for the undo command. */
+let rawBackup: string | null = null;
 
 export function activate(context: vscode.ExtensionContext): void {
   output = vscode.window.createOutputChannel("Tidy Paste");
@@ -39,6 +41,23 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("tidy-paste.showOutput", () => {
       output?.show(true);
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("tidy-paste.restoreRaw", async () => {
+      if (rawBackup === null) {
+        vscode.window.showInformationMessage(
+          "Tidy Paste: nothing to restore. The clipboard hasn't been cleaned yet.",
+        );
+        return;
+      }
+      await vscode.env.clipboard.writeText(rawBackup);
+      lastProcessed = rawBackup;
+      setStatus("restored raw");
+      vscode.window.showInformationMessage(
+        "Tidy Paste: clipboard restored to the uncleaned original.",
+      );
     }),
   );
 
@@ -124,9 +143,9 @@ async function tickClipboardWatcher(): Promise<void> {
     const result = cleanCopiedText(current, {
       terminalColumns,
       appWrapColumn: config.get<number>("appWrapColumn") ?? 80,
-      minWrapLines: config.get<number>("minWrapLines") ?? 2,
       stripTrailingWhitespace: config.get<boolean>("stripTrailingWhitespace") ?? true,
-      preserveCodeFences: config.get<boolean>("preserveCodeFences") ?? true,
+      preserveBlocks: config.get<boolean>("preserveCodeFences") ?? true,
+      dedent: config.get<boolean>("dedent") ?? true,
     });
 
     if (config.get<boolean>("debug", false)) {
@@ -148,9 +167,10 @@ async function tickClipboardWatcher(): Promise<void> {
     }
 
     if (result.changed) {
+      rawBackup = current; // keep the uncleaned original for restoreRaw
       await vscode.env.clipboard.writeText(result.text);
-      lastProcessed = result.text; // don't re-process our own write
-      setStatus(`cleaned ${result.notes.length} cluster(s)`);
+      lastProcessed = result.text;
+      setStatus(`cleaned ${result.notes.length} boundary/ies`);
     } else {
       lastProcessed = current;
       setStatus(`no change (${current.split("\n").length} lines)`);
@@ -191,9 +211,9 @@ async function cleanEditorSelection(): Promise<void> {
       const result = cleanCopiedText(raw, {
         terminalColumns: 0,
         appWrapColumn: config.get<number>("appWrapColumn") ?? 80,
-        minWrapLines: config.get<number>("minWrapLines") ?? 2,
-        stripTrailingWhitespace: config.get<boolean>("stripTrailingWhitespace") ?? true,
-        preserveCodeFences: config.get<boolean>("preserveCodeFences") ?? true,
+          stripTrailingWhitespace: config.get<boolean>("stripTrailingWhitespace") ?? true,
+        preserveBlocks: config.get<boolean>("preserveCodeFences") ?? true,
+      dedent: config.get<boolean>("dedent") ?? true,
       });
       if (result.changed) {
         edit.replace(sel, result.text);
