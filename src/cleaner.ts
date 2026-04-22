@@ -409,6 +409,9 @@ function joinSeparator(prev: string, next: string): string {
   const firstChar = next[0]!;
   if (/\s/.test(lastChar) || /\s/.test(firstChar)) return "";
   if (CONTINUATION_STARTERS.has(firstChar)) return "";
+  // URL context: if the prev line contains a URL scheme, the wrap almost
+  // certainly broke inside the URL (mid-domain, mid-path). No space.
+  if (/:\/\//.test(prev) && /^[A-Za-z0-9]/.test(firstChar)) return "";
   return " ";
 }
 

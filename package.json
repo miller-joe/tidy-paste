@@ -2,7 +2,7 @@
   "name": "tidy-paste",
   "displayName": "Tidy Paste",
   "description": "Cleans terminal-wrapped text on copy from VS Code's integrated terminal so pasted content arrives without stray line breaks or trailing whitespace.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "miller-joe",
   "license": "MIT",
   "repository": {

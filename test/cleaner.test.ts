@@ -107,6 +107,17 @@ describe("separate shell commands don't merge", () => {
   });
 });
 
+describe("URL mid-domain wraps", () => {
+  it("joins a URL wrapped mid-domain without inserting a space", () => {
+    const input =
+      "● v0.1.0 shipped. Download: https://github.com/miller-joe/tidy-paste/releases/downloa\n" +
+      "d/v0.1.0/tidy-paste-0.1.0.vsix";
+    const r = cleanCopiedText(input, { terminalColumns: 0, appWrapColumn: 0 });
+    expect(r.text).toContain("/releases/download/v0.1.0/");
+    expect(r.text).not.toContain("downloa d");
+  });
+});
+
 describe("smart join separator", () => {
   it("no space when next line starts with '.' (URL continuation)", () => {
     const input =
