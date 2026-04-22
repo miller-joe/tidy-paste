@@ -5,7 +5,16 @@ let output: vscode.OutputChannel | undefined;
 let statusBar: vscode.StatusBarItem | undefined;
 let watcherInterval: NodeJS.Timeout | undefined;
 let lastProcessed = "";
+let lastProcessedLen = 0;
+let lastProcessedHash = 0;
 let windowFocused = true;
+
+/** Quick 32-bit hash — djb2. Used to short-circuit clipboard comparisons when content is large. */
+function quickHash(s: string): number {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h;
+}
 /** Last raw clipboard content we cleaned, kept for the undo command. */
 let rawBackup: string | null = null;
 
@@ -71,6 +80,8 @@ export function activate(context: vscode.ExtensionContext): void {
   // watcher doesn't immediately clean pre-existing content on startup.
   void vscode.env.clipboard.readText().then((seed) => {
     lastProcessed = seed ?? "";
+    lastProcessedLen = lastProcessed.length;
+    lastProcessedHash = quickHash(lastProcessed);
     startClipboardWatcher(context);
   });
 
@@ -107,7 +118,7 @@ function startClipboardWatcher(context: vscode.ExtensionContext): void {
     setStatus("disabled");
     return;
   }
-  const intervalMs = Math.max(100, config.get<number>("watchIntervalMs") ?? 300);
+  const intervalMs = Math.max(250, config.get<number>("watchIntervalMs") ?? 1000);
 
   watcherInterval = setInterval(() => {
     if (!windowFocused) return; // cheap bail-out when VS Code is backgrounded
@@ -128,7 +139,20 @@ function stopClipboardWatcher(): void {
 async function tickClipboardWatcher(): Promise<void> {
   try {
     const current = await vscode.env.clipboard.readText();
-    if (!current || current === lastProcessed) return;
+    if (!current) return;
+
+    // Fast path: length + hash check avoids full string comparison on every
+    // tick when the clipboard holds a large unchanged blob.
+    if (current.length === lastProcessedLen) {
+      const h = quickHash(current);
+      if (h === lastProcessedHash) return;
+      lastProcessedHash = h;
+    } else {
+      lastProcessedLen = current.length;
+      lastProcessedHash = quickHash(current);
+    }
+
+    if (current === lastProcessed) return;
 
     // Quick bail-outs before the heavier cleanup.
     if (!current.includes("\n")) {

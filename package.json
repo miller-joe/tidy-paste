@@ -2,7 +2,7 @@
   "name": "tidy-paste",
   "displayName": "Tidy Paste",
   "description": "Cleans terminal-wrapped text on copy from VS Code's integrated terminal so pasted content arrives without stray line breaks or trailing whitespace.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "miller-joe",
   "license": "MIT",
   "repository": {
@@ -78,8 +78,8 @@
         },
         "tidyPaste.watchIntervalMs": {
           "type": "number",
-          "default": 300,
-          "description": "How often to check the clipboard for changes, in milliseconds. Lower = more responsive but uses slightly more CPU."
+          "default": 1000,
+          "description": "How often to check the clipboard for changes, in milliseconds. Lower = more responsive but uses more CPU. 1000ms is the default because 300ms caused noticeable editor lag in real testing."
         },
         "tidyPaste.appWrapColumn": {
           "type": "number",
